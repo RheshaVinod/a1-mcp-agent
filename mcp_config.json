@@ -1,0 +1,18 @@
+{
+  "filesystem": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "${MCP_FILESYSTEM_ROOT}"]
+  },
+  "tavily": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "tavily-mcp@latest"],
+    "env": { "TAVILY_API_KEY": "${TAVILY_API_KEY}" }
+  },
+  "fetch": {
+    "transport": "stdio",
+    "command": "${PYTHON_BIN}",
+    "args": ["-m", "mcp_server_fetch"]
+  }
+}
