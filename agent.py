@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import os
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -27,10 +27,41 @@ Rules:
   history, answer directly. Do not call a tool just to appear busy.
 - If one tool's output is not enough, call another. Chaining is expected: search for
   a page, then fetch it; or read a file, then search for what it references.
+- Stop calling tools as soon as you have enough to answer. "Fetch the page" means one
+  page, normally the best search result; do not crawl further pages unless asked.
+  Fetch it once with max_length around 20000 rather than paging through it with
+  start_index. Most questions need no more than three tool calls.
 - A tool result beginning with "MCP " and naming a failure is an error, not data.
   Say what failed, then answer as best you can without it or try a different tool.
 - Cite which tool and which server produced any external fact you report.
 """
+
+
+# Tool results allowed per turn before the model is told to answer. Without a cap,
+# an open-ended request ("fetch the spec and summarize it") can keep crawling linked
+# pages until LangGraph's recursion limit replaces the answer with an apology.
+TOOL_CALL_BUDGET = 6
+
+BUDGET_REACHED = HumanMessage(
+    content="[Tool budget reached] Do not call any more tools. Write your final "
+    "answer now from the information already gathered, and say what you could not check."
+)
+
+
+def enforce_tool_budget(state: dict) -> dict:
+    """pre_model_hook: once this turn has used its tool budget, tell the model to answer.
+
+    The note goes only into this LLM call's input, never into the saved history.
+    """
+    messages: list[AnyMessage] = state["messages"]
+    turn_start = max(
+        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=0
+    )
+    used = sum(isinstance(m, ToolMessage) for m in messages[turn_start:])
+    if used < TOOL_CALL_BUDGET:
+        return {"llm_input_messages": messages}
+    log.info("Tool budget of %d reached; asking the model to answer", TOOL_CALL_BUDGET)
+    return {"llm_input_messages": [*messages, BUDGET_REACHED]}
 
 
 def build_llm() -> ChatOpenAI:
@@ -68,6 +99,7 @@ def build_agent(tools: list[StructuredTool]):
         build_llm(),
         tools,
         prompt=SYSTEM_PROMPT,
+        pre_model_hook=enforce_tool_budget,
         checkpointer=MemorySaver(),
     )
 
@@ -76,7 +108,7 @@ async def answer(graph, query: str, session_id: str) -> str:
     """Run one turn through the graph under the given session's memory thread."""
     state = await graph.ainvoke(
         {"messages": [HumanMessage(content=query)]},
-        config={"configurable": {"thread_id": session_id}, "recursion_limit": 24},
+        config={"configurable": {"thread_id": session_id}, "recursion_limit": 40},
     )
     final = state["messages"][-1]
     return final.content if isinstance(final.content, str) else str(final.content)
