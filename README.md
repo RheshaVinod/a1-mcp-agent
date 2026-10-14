@@ -20,91 +20,18 @@ All three are external open-source projects, used as published and cited above.
 
 ## Diagram 1 — System architecture
 
-```mermaid
-flowchart LR
-    Client["Client<br/>POST /chat<br/>{query, session_id}"]
-
-    subgraph CR["Cloud Run service (csci599-a1)"]
-        API["FastAPI<br/>main.py<br/>/chat · / · /health"]
-
-        subgraph GRAPH["LangGraph ReAct graph (agent.py)"]
-            Reason["agent node<br/>LLM reasoning"]
-            Tools["tools node<br/>executes selected tool"]
-            Reason -->|tool_calls| Tools
-            Tools -->|ToolMessage| Reason
-        end
-
-        Mem[("MemorySaver checkpointer<br/>thread_id = session_id")]
-        Wrap["MCP client wrapper<br/>mcp_runtime.py<br/>discovery · timeout · error classification"]
-    end
-
-    LLM["NVIDIA NIM<br/>integrate.api.nvidia.com/v1"]
-    FS["filesystem MCP server<br/>npx @modelcontextprotocol/server-filesystem"]
-    TV["Tavily search MCP server<br/>npx tavily-mcp"]
-    FE["fetch MCP server<br/>python -m mcp_server_fetch"]
-
-    Client -->|request| API
-    API -->|"{response}"| Client
-    API <-->|"ainvoke(thread_id)"| Reason
-    Reason <-->|load / save state| Mem
-    Reason <-->|chat completion| LLM
-    Tools <--> Wrap
-    Wrap <-->|"JSON-RPC over stdio<br/>tools/list · tools/call"| FS
-    Wrap <-->|"JSON-RPC over stdio<br/>tools/list · tools/call"| TV
-    Wrap <-->|"JSON-RPC over stdio<br/>tools/list · tools/call"| FE
-```
+![System architecture showing the request flow between the client, Cloud Run service, LangGraph agent, memory, LLM, and three MCP servers](docs/diagrams/system-architecture.png)
 
 ## Diagram 2 — Tool invocation flow
 
 The loop-back is the point: after every tool result the LLM reasons again and may
 call another tool before it is allowed to emit a final answer.
 
-```mermaid
-flowchart TD
-    Q["User query + session_id"] --> Entry["Agent entry<br/>restore thread state from checkpointer"]
-    Entry --> Think["LLM reasoning step<br/>tool needed, or answer from knowledge?"]
-    Think -->|no tool needed| Final["Final response"]
-    Think -->|tool needed| Select["Tool selection<br/>name + arguments validated<br/>against the tool's JSON Schema"]
-    Select --> Call["MCP tools/call<br/>via client wrapper"]
-    Call --> Server["MCP server executes"]
-    Server --> Result["Tool result"]
-    Call -->|"transport fault ·<br/>execution error ·<br/>malformed response"| Err["Error captured as text<br/>'MCP &lt;kind&gt; calling ...'"]
-    Err --> Synth
-    Result --> Synth["LLM synthesis step<br/>incorporate result"]
-    Synth -->|more information needed| Think
-    Synth -->|sufficient| Final
-    Final --> Save["Persist turn to checkpointer<br/>under thread_id"]
-    Save --> Out["{ response }"]
-```
+![Tool invocation flow showing LLM reasoning, MCP tool selection and execution, error handling, synthesis, and the loop back for additional tool calls](docs/diagrams/tool-invocation-flow.png)
 
 ## Diagram 3 — Deployment topology
 
-```mermaid
-flowchart LR
-    subgraph LOCAL["Local development (macOS)"]
-        Src["Source tree"]
-        Env[".env<br/>OPENAI_API_KEY<br/>OPENAI_BASE_URL<br/>LLM_MODEL<br/>TAVILY_API_KEY<br/>(gitignored)"]
-        Test["test_mcp.py<br/>discovery + 3 failure modes"]
-        Run["python main.py<br/>localhost:8080"]
-        Env -->|load_dotenv| Run
-        Src --> Run
-        Src --> Test
-    end
-
-    subgraph GCP["Google Cloud — project ancient-booster-494014-a4"]
-        CB["Cloud Build<br/>multi-stage Dockerfile"]
-        AR["Artifact Registry<br/>gcr.io/PROJECT/csci599-a1"]
-        Svc["Cloud Run service<br/>region us-west1<br/>512Mi · min 0 · max 1<br/>--allow-unauthenticated"]
-        URL["Live HTTPS URL"]
-        CB --> AR --> Svc --> URL
-    end
-
-    Src -->|"gcloud builds submit"| CB
-    Env -.->|"set -a; source .env<br/>then --set-env-vars"| Svc
-    LLMC["NVIDIA NIM API"]
-    Svc -->|"HTTPS, key from env"| LLMC
-    Svc -->|"stdio subprocesses<br/>inside the container"| MCPs["filesystem · tavily · fetch<br/>MCP servers"]
-```
+![Deployment topology showing local development, Cloud Build, Artifact Registry, Cloud Run, environment variables, NVIDIA NIM, and the MCP servers](docs/diagrams/deployment-topology.png)
 
 Keys never enter the image or the repository. They live in the local `.env`, are
 sourced into the deploying shell, and reach the service only through `--set-env-vars`.
